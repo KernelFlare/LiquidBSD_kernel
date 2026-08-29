@@ -11,18 +11,42 @@ int relocate_image(char *image) {
   const auto dos_header = reinterpret_cast<IMAGE_DOS_HEADER *>(image);
   const auto pe_header = dos_header->GetPEHeader();
   const auto optional_header = &pe_header->OptionalHeader;
+  const auto Adjust =
+      reinterpret_cast<size_t>(image - optional_header->ImageBase);
+
+  // DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC] is only valid when the
+  // optional header both declares (NumberOfRvaAndSizes) and physically contains
+  // (SizeOfOptionalHeader) that entry; otherwise indexing it would read
+  // section-table bytes past the header and mis-parse them.
+  constexpr size_t kRelocDirEnd =
+      offsetof(IMAGE_OPTIONAL_HEADER64, DataDirectory) +
+      (IMAGE_DIRECTORY_ENTRY_BASERELOC + 1) * sizeof(IMAGE_DATA_DIRECTORY);
+  const bool have_reloc_dir =
+      optional_header->NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_BASERELOC &&
+      pe_header->FileHeader.SizeOfOptionalHeader >= kRelocDirEnd;
   const auto reloc_directory =
-      optional_header->DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
-  if (reloc_directory.Size == 0) {
-    printf("Relocation section empty\n");
+      have_reloc_dir
+          ? optional_header->DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC]
+          : IMAGE_DATA_DIRECTORY{};
+  if (!have_reloc_dir || reloc_directory.Size == 0) {
+    // No relocations to apply. That is safe only if the image already sits at
+    // its preferred base or is position independent. An image whose relocations
+    // were stripped (IMAGE_FILE_RELOCS_STRIPPED: it must load at ImageBase) that
+    // landed elsewhere would run with unadjusted absolute addresses, so reject
+    // it instead of reporting success.
+    if (Adjust != 0 &&
+        (pe_header->FileHeader.Characteristics & IMAGE_FILE_RELOCS_STRIPPED)) {
+      printf("Image relocations stripped but not loaded at its ImageBase\n");
+      return -1;
+    }
+    printf("%s\n", have_reloc_dir ? "Relocation section empty"
+                                  : "No base relocation directory present");
     return 0;
   }
   auto RelocBase = reinterpret_cast<EFI_IMAGE_BASE_RELOCATION *>(
       image + reloc_directory.VirtualAddress);
   const auto RelocBaseEnd = reinterpret_cast<EFI_IMAGE_BASE_RELOCATION *>(
       reinterpret_cast<char *>(RelocBase) + reloc_directory.Size);
-  const auto Adjust =
-      reinterpret_cast<size_t>(image - optional_header->ImageBase);
   //
   // Run this relocation record
   //
@@ -71,9 +95,11 @@ int relocate_image(char *image) {
         break;
 
       case EFI_IMAGE_REL_BASED_ARM_MOV32A:
+        // ARM MOVW/MOVT instruction encoding is not implemented. Reject the
+        // image rather than letting it reach its entry point with this
+        // relocation left unapplied.
         printf("Unsupported relocation type: EFI_IMAGE_REL_BASED_ARM_MOV32A\n");
-        // break omitted - ARM instruction encoding not implemented
-        break;
+        return -1;
       case EFI_IMAGE_REL_BASED_LOONGARCH64_MARK_LA: {
         // The next four instructions are used to load a 64 bit address,
         // relocate all of them
