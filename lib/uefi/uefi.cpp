@@ -55,16 +55,6 @@ constexpr auto EFI_SYSTEM_TABLE_SIGNATURE =
 
 using EfiEntry = int (*)(void *, struct EfiSystemTable *);
 
-template <typename T> void fill(T *data, size_t skip, uint8_t begin = 0) {
-  auto ptr = reinterpret_cast<char *>(data);
-  for (size_t i = 0; i < sizeof(T); i++) {
-    if (i < skip) {
-      continue;
-    }
-    ptr[i] = begin++;
-  }
-}
-
 const char16_t firmwareVendor[] = u"Little Kernel";
 
 class ImageReader {
@@ -180,8 +170,6 @@ int load_sections_and_execute(ImageReader *reader,
   DEFER { free_pages(&table, 1); };
   EfiBootService boot_service{};
   EfiRuntimeService runtime_service{};
-  fill(&runtime_service, 0);
-  fill(&boot_service, 0);
   setup_runtime_service_table(&runtime_service);
   setup_boot_service_table(&boot_service);
   table.firmware_vendor = reinterpret_cast<const EfiChar16*>(firmwareVendor);

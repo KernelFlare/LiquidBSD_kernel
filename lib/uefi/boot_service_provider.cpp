@@ -507,6 +507,7 @@ void setup_boot_service_table(EfiBootService *service) {
   service->check_event = switch_stack_wrapper<EfiEvent, check_event>();
   service->create_event = create_event;
   service->close_event = close_event;
+  service->set_timer = set_timer;
   service->stall = stall;
   service->raise_tpl = raise_tpl;
   service->restore_tpl = restore_tpl;
