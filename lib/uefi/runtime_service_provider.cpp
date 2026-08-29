@@ -41,28 +41,44 @@ EfiStatus GetVariable(const uint16_t *VariableName, const EfiGuid *VendorGuid,
     i++;
   }
   buffer[i] = 0;
-  if (strncmp(buffer, kSecureBoot, sizeof(kSecureBoot)) == 0 || strcmp(buffer, "SetupMode") == 0) {
-    if (DataSize) {
+  // SecureBoot / SetupMode are architecturally defined under
+  // EFI_GLOBAL_VARIABLE_GUID. Only synthesize them for that namespace; a
+  // same-named variable under a different GUID must fall through to the store.
+  if ((strncmp(buffer, kSecureBoot, sizeof(kSecureBoot)) == 0 ||
+       strcmp(buffer, "SetupMode") == 0) &&
+      memcmp(VendorGuid, &EFI_GLOBAL_VARIABLE_GUID, sizeof(EfiGuid)) == 0) {
+    // Publish the attributes as soon as the variable is recognized, so a
+    // size probe that returns EFI_STATUS_BUFFER_TOO_SMALL reports the same
+    // attributes as a successful read, matching how stored variables behave.
+    if (Attributes != nullptr) {
+      *Attributes = EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS;
+    }
+    if (*DataSize < 1) {
       *DataSize = 1;
+      return EFI_STATUS_BUFFER_TOO_SMALL;
     }
-    if (Data) {
-      memset(Data, 0, 1);
+    if (Data == nullptr) {
+      return EFI_STATUS_INVALID_PARAMETER;
     }
+    *DataSize = 1;
+    memset(Data, 0, 1);
     return EFI_STATUS_SUCCESS;
   }
 
   char *data_in_mem;
   size_t data_in_mem_size;
   if (efi_get_variable(reinterpret_cast<const char16_t *>(VariableName), VendorGuid, Attributes, &data_in_mem, &data_in_mem_size) == EFI_STATUS_SUCCESS) {
-    if (*DataSize == 0 && !Data) {
+    if (data_in_mem_size > *DataSize) {
       *DataSize = data_in_mem_size;
       return EFI_STATUS_BUFFER_TOO_SMALL;
     }
-    if (data_in_mem_size > *DataSize) {
-      return EFI_STATUS_BUFFER_TOO_SMALL;
+    if (Data == nullptr && data_in_mem_size > 0) {
+      return EFI_STATUS_INVALID_PARAMETER;
     }
     *DataSize = data_in_mem_size;
-    memcpy(Data, data_in_mem, data_in_mem_size);
+    if (data_in_mem_size > 0) {
+      memcpy(Data, data_in_mem, data_in_mem_size);
+    }
     return EFI_STATUS_SUCCESS;
   }
 
