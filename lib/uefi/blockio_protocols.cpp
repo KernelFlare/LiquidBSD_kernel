@@ -60,13 +60,13 @@ EfiStatus read_blocks(EfiBlockIoProtocol *self, uint32_t media_id, uint64_t lba,
 
 EfiStatus write_blocks(EfiBlockIoProtocol *self, uint32_t media_id,
                        uint64_t lba, size_t buffer_size, void *buffer) {
-  printf("%s is called\n", __FUNCTION__);
-  return EFI_STATUS_SUCCESS;
+  printf("Writing blocks from UEFI app is currently not supported to protect "
+         "the device.\n");
+  return EFI_STATUS_UNSUPPORTED;
 }
 
 EfiStatus flush_blocks(EfiBlockIoProtocol *self) {
-  printf("%s is called\n", __FUNCTION__);
-  return EFI_STATUS_SUCCESS;
+  return EFI_STATUS_UNSUPPORTED;
 }
 
 EfiStatus reset(EfiBlockIoProtocol *self, bool extended_verification) {
