@@ -95,11 +95,14 @@ EfiStatus SetVirtualAddressMap(size_t MemoryMapSize, size_t DescriptorSize,
 
 EfiStatus SetVariable(const uint16_t* VariableName, const EfiGuid* VendorGuid,
                       uint32_t Attributes, size_t DataSize, const void* Data) {
-  if (!VariableName || VariableName[0] == 0) {
+  if (!VariableName || VariableName[0] == 0 || VendorGuid == nullptr) {
+    return EFI_STATUS_INVALID_PARAMETER;
+  }
+  if (DataSize > 0 && Data == nullptr) {
     return EFI_STATUS_INVALID_PARAMETER;
   }
 
-  /* Only allow setting non-volatile variables */
+  /* Only volatile variables are supported */
   if ((Attributes & EFI_VARIABLE_NON_VOLATILE) == 0) {
     efi_set_variable(reinterpret_cast<const char16_t *>(VariableName),
                      VendorGuid,
@@ -109,7 +112,7 @@ EfiStatus SetVariable(const uint16_t* VariableName, const EfiGuid* VendorGuid,
     return EFI_STATUS_SUCCESS;
   }
 
-  printf("%s: Only non-volatile is supported. Attributes = 0x%x\n",
+  printf("%s: only volatile variables are supported. Attributes = 0x%x\n",
          __FUNCTION__,
          Attributes);
   return EFI_STATUS_UNSUPPORTED;

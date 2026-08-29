@@ -87,6 +87,18 @@ void efi_set_variable(const char16_t *variable_name,
                       size_t data_len) {
   struct EfiVariable *var = search_existing_variable(variable_name, guid);
 
+  /* A zero-size write deletes the variable, but only when this is not an
+   * append. With EFI_VARIABLE_APPEND_WRITE set, appending zero bytes is a
+   * no-op that must leave any existing value unchanged. */
+  if (data_len == 0) {
+    if ((attribute & EFI_VARIABLE_APPEND_WRITE) == 0 && var) {
+      list_delete(&var->node);
+      free(var->Data);
+      free(var);
+    }
+    return;
+  }
+
   /* alloc new variable if it is not existed */
   if (!var) {
     var = reinterpret_cast<struct EfiVariable *>(malloc(sizeof(struct EfiVariable)));
