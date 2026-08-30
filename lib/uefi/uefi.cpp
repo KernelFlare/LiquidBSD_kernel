@@ -128,6 +128,7 @@ int load_sections_and_execute(ImageReader *reader,
   }
   setup_heap();
   DEFER { reset_heap(); };
+  DEFER { release_boot_buffers(); };
   const auto &last_section = section_header[sections - 1];
   const auto virtual_size = ROUNDUP(
       last_section.VirtualAddress + last_section.Misc.VirtualSize, PAGE_SIZE);
