@@ -27,6 +27,7 @@
 #include <uefi/protocols/block_io2_protocol.h>
 #include <uefi/types.h>
 
+#include "blockio_protocols.h"
 #include "events.h"
 #include "io_stack.h"
 #include "memory_protocols.h"
@@ -134,10 +135,21 @@ EfiStatus flush_blocks_ex(EfiBlockIo2Protocol* self, EfiBlockIo2Token* token) {
 }  // namespace
 
 __WEAK EfiStatus open_async_block_device(EfiHandle handle, const void** intf) {
-  auto dev = bio_open(reinterpret_cast<const char*>(handle));
+  bdev_t *dev = nullptr;
+  EfiStatus status =
+      open_tracked_bdev(reinterpret_cast<const char*>(handle), &dev);
+  if (status != EFI_STATUS_SUCCESS) {
+    if (status == EFI_STATUS_NOT_FOUND) {
+      printf("%s: no such block device\n", __FUNCTION__);
+    }
+    return status;
+  }
   printf("%s(%s)\n", __FUNCTION__, dev->name);
   auto interface = reinterpret_cast<EfiBlockIo2Interface*>(
       uefi_malloc(sizeof(EfiBlockIo2Interface)));
+  if (interface == nullptr) {
+    return EFI_STATUS_OUT_OF_RESOURCES;
+  }
   auto protocol = &interface->protocol;
   auto media = &interface->media;
   protocol->media = media;

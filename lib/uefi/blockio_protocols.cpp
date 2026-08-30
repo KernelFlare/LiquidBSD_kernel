@@ -18,6 +18,7 @@
 
 #include <kernel/vm.h>
 #include <lib/bio.h>
+#include <malloc.h>
 #include <string.h>
 #include <uefi/protocols/block_io_protocol.h>
 #include <uefi/types.h>
@@ -75,6 +76,48 @@ EfiStatus reset(EfiBlockIoProtocol *self, bool extended_verification) {
 }
 }  // namespace
 
+namespace {
+// Every bio_open() for the current image run is tracked so its reference can be
+// released at teardown by close_tracked_bdevs(). This is a growable list rather
+// than a fixed array on purpose: close_protocol() does not release individual
+// Block I/O references, so the tracker counts cumulative opens, and a bounded
+// table would reject opens after enough OpenProtocol/CloseProtocol cycles.
+struct TrackedBdev {
+  bdev_t *dev;
+  TrackedBdev *next;
+};
+TrackedBdev *tracked_bdevs = nullptr;
+}  // namespace
+
+EfiStatus open_tracked_bdev(const char *name, bdev_t **out_dev) {
+  *out_dev = nullptr;
+  bdev_t *dev = bio_open(name);
+  if (dev == nullptr) {
+    return EFI_STATUS_NOT_FOUND;
+  }
+  auto *node = reinterpret_cast<TrackedBdev *>(malloc(sizeof(TrackedBdev)));
+  if (node == nullptr) {
+    // Can't remember the reference, so don't hand out an untracked one.
+    printf("%s: out of memory tracking %s\n", __FUNCTION__, name);
+    bio_close(dev);
+    return EFI_STATUS_OUT_OF_RESOURCES;
+  }
+  node->dev = dev;
+  node->next = tracked_bdevs;
+  tracked_bdevs = node;
+  *out_dev = dev;
+  return EFI_STATUS_SUCCESS;
+}
+
+void close_tracked_bdevs() {
+  while (tracked_bdevs != nullptr) {
+    TrackedBdev *node = tracked_bdevs;
+    tracked_bdevs = node->next;
+    bio_close(node->dev);
+    free(node);
+  }
+}
+
 __WEAK EfiStatus open_block_device(EfiHandle handle, const void** intf) {
   printf("%s(%p)\n", __FUNCTION__, handle);
   auto io_stack = get_io_stack();
@@ -87,7 +130,15 @@ __WEAK EfiStatus open_block_device(EfiHandle handle, const void** intf) {
     return EFI_STATUS_OUT_OF_RESOURCES;
   }
   memset(interface, 0, sizeof(EfiBlockIoInterface));
-  auto dev = bio_open(reinterpret_cast<const char *>(handle));
+  bdev_t *dev = nullptr;
+  EfiStatus status =
+      open_tracked_bdev(reinterpret_cast<const char *>(handle), &dev);
+  if (status != EFI_STATUS_SUCCESS) {
+    if (status == EFI_STATUS_NOT_FOUND) {
+      printf("%s: no such block device\n", __FUNCTION__);
+    }
+    return status;
+  }
   interface->dev = dev;
   interface->protocol.revision = EFI_BLOCK_IO_PROTOCOL_REVISION;
   interface->protocol.reset = reset;

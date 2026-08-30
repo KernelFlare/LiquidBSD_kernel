@@ -33,6 +33,7 @@
 #include <uefi/protocols/random_number_generator_protocol.h>
 #include <uefi/types.h>
 
+#include "blockio_protocols.h"
 #include "defer.h"
 
 #define LOCAL_TRACE 0
@@ -377,7 +378,10 @@ __WEAK EfiStatus open_efi_erase_block_protocol(EfiHandle handle, const void** in
     return EFI_STATUS_OUT_OF_RESOURCES;
   }
   memset(p, 0, sizeof(*p));
-  p->dev = bio_open(device_name);
+  EfiStatus status = open_tracked_bdev(device_name, &p->dev);
+  if (status != EFI_STATUS_SUCCESS) {
+    return status;
+  }
   p->protocol = {
       .revision = EFI_ERASE_BLOCK_PROTOCOL_REVISION,
       .erase_length_granularity = 1,  // Erase block size == 1 filesystem block
