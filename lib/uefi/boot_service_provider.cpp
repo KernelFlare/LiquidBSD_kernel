@@ -17,6 +17,7 @@
 #include "boot_service_provider.h"
 
 #include <endian.h>
+#include <lib/cksum.h>
 #include <lk/compiler.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -258,9 +259,12 @@ EfiStatus uninstall_multiple_protocol_interfaces(EfiHandle handle, ...) {
   printf("%s is unsupported\n", __FUNCTION__);
   return EFI_STATUS_UNSUPPORTED;
 }
-EfiStatus calculate_crc32(void *data, size_t len, uint32_t *crc32) {
-  printf("%s is unsupported\n", __FUNCTION__);
-  return EFI_STATUS_UNSUPPORTED;
+EfiStatus calculate_crc32(void *data, size_t len, uint32_t *crc_out) {
+  if (data == nullptr || crc_out == nullptr || len == 0) {
+    return EFI_STATUS_INVALID_PARAMETER;
+  }
+  *crc_out = crc32(0, static_cast<const unsigned char *>(data), len);
+  return EFI_STATUS_SUCCESS;
 }
 
 EfiStatus uninstall_protocol_interface(EfiHandle handle,
