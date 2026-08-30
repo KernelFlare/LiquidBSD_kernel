@@ -285,15 +285,20 @@ int load_pe_file(ImageReader *reader) {
   dprintf(INFO, "bio_read returns %d, took %u msecs (%d bytes/sec)\n", (int)err,
           (uint)t, (uint32_t)((uint64_t)err * 1000 / t));
 
+  const size_t header_bytes = static_cast<size_t>(err);
+  if (header_bytes < sizeof(IMAGE_DOS_HEADER)) {
+    printf("File too small for a DOS header: %zu bytes\n", header_bytes);
+    return ERR_BAD_STATE;
+  }
   const auto dos_header = reinterpret_cast<const IMAGE_DOS_HEADER *>(address);
   if (!dos_header->CheckMagic()) {
     printf("DOS Magic check failed %x\n", dos_header->e_magic);
     return ERR_BAD_STATE;
   }
-  if (dos_header->e_lfanew > kBlocKSize - sizeof(IMAGE_FILE_HEADER)) {
+  if (dos_header->e_lfanew > header_bytes - sizeof(IMAGE_FILE_HEADER)) {
     printf(
         "Invalid PE header offset %d exceeds maximum read size of %zu - %zu\n",
-        dos_header->e_lfanew, kBlocKSize, sizeof(IMAGE_FILE_HEADER));
+        dos_header->e_lfanew, header_bytes, sizeof(IMAGE_FILE_HEADER));
     return ERR_BAD_STATE;
   }
   const auto pe_header = dos_header->GetPEHeader();
@@ -315,10 +320,27 @@ int load_pe_file(ImageReader *reader) {
            file_header->SizeOfOptionalHeader, sizeof(IMAGE_OPTIONAL_HEADER64));
     return ERR_BAD_STATE;
   }
+  const size_t nt_headers_end = static_cast<size_t>(dos_header->e_lfanew) +
+                                sizeof(IMAGE_FILE_HEADER) +
+                                file_header->SizeOfOptionalHeader;
+  if (nt_headers_end > header_bytes) {
+    printf("PE optional header does not fit in the %zu bytes read\n",
+           header_bytes);
+    return ERR_BAD_STATE;
+  }
+  const size_t section_table_end =
+      nt_headers_end + static_cast<size_t>(file_header->NumberOfSections) *
+                           sizeof(IMAGE_SECTION_HEADER);
+  if (section_table_end > header_bytes) {
+    printf("PE section table does not fit in the %zu bytes read\n",
+           header_bytes);
+    return ERR_BAD_STATE;
+  }
   const auto optional_header = &pe_header->OptionalHeader;
   if (optional_header->Subsystem != SubsystemType::EFIApplication) {
     printf("Unsupported Subsystem type: %d %s\n", optional_header->Subsystem,
            ToString(optional_header->Subsystem));
+    return ERR_NOT_SUPPORTED;
   }
   printf("Valid UEFI application found.\n");
   auto ret = load_sections_and_execute(reader, pe_header);
