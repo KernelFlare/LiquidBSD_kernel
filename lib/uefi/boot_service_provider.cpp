@@ -17,6 +17,7 @@
 #include "boot_service_provider.h"
 
 #include <endian.h>
+#include <limits.h>
 #include <lib/cksum.h>
 #include <lk/compiler.h>
 #include <stdio.h>
@@ -260,10 +261,22 @@ EfiStatus uninstall_multiple_protocol_interfaces(EfiHandle handle, ...) {
   return EFI_STATUS_UNSUPPORTED;
 }
 EfiStatus calculate_crc32(void *data, size_t len, uint32_t *crc_out) {
-  if (data == nullptr || crc_out == nullptr || len == 0) {
+  if (data == nullptr || crc_out == nullptr) {
     return EFI_STATUS_INVALID_PARAMETER;
   }
-  *crc_out = crc32(0, static_cast<const unsigned char *>(data), len);
+  // A non-null zero-length buffer has a well-defined CRC of 0. crc32() takes an
+  // unsigned int length, so feed large buffers in UINT_MAX-sized chunks rather
+  // than silently truncating; the running crc makes the split transparent.
+  unsigned long crc = 0;
+  const auto *buf = static_cast<const unsigned char *>(data);
+  while (len > 0) {
+    const unsigned int chunk =
+        len > UINT_MAX ? UINT_MAX : static_cast<unsigned int>(len);
+    crc = crc32(crc, buf, chunk);
+    buf += chunk;
+    len -= chunk;
+  }
+  *crc_out = static_cast<uint32_t>(crc);
   return EFI_STATUS_SUCCESS;
 }
 
