@@ -163,7 +163,7 @@ int load_sections_and_execute(ImageReader *reader,
   }
   printf("Relocating image from 0x%llx to %p\n", optional_header->ImageBase,
          image_base);
-  if (relocate_image(image_base) != 0) {
+  if (relocate_image(image_base, virtual_size) != 0) {
     printf("Failed to relocate image\n");
     return ERR_BAD_STATE;
   }
