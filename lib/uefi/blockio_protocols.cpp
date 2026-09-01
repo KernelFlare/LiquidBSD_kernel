@@ -109,6 +109,19 @@ EfiStatus open_tracked_bdev(const char *name, bdev_t **out_dev) {
   return EFI_STATUS_SUCCESS;
 }
 
+bool close_tracked_bdev(const char *name) {
+  for (TrackedBdev **pp = &tracked_bdevs; *pp != nullptr; pp = &(*pp)->next) {
+    if (strcmp((*pp)->dev->name, name) == 0) {
+      TrackedBdev *node = *pp;
+      *pp = node->next;
+      bio_close(node->dev);
+      free(node);
+      return true;
+    }
+  }
+  return false;
+}
+
 void close_tracked_bdevs() {
   while (tracked_bdevs != nullptr) {
     TrackedBdev *node = tracked_bdevs;

@@ -418,6 +418,9 @@ EfiStatus close_protocol(EfiHandle handle, const EfiGuid *protocol,
   } else if (guid_eq(protocol, EFI_DEVICE_PATH_PROTOCOL_GUID)) {
     return EFI_STATUS_SUCCESS;
   } else if (guid_eq(protocol, EFI_BLOCK_IO_PROTOCOL_GUID)) {
+    // Balance the bio reference taken by open_block_device(); teardown still
+    // reclaims any opens the app never closed.
+    close_tracked_bdev(reinterpret_cast<const char *>(handle));
     return EFI_STATUS_SUCCESS;
   } else if (guid_eq(protocol, EFI_DT_FIXUP_PROTOCOL_GUID)) {
     return EFI_STATUS_SUCCESS;
