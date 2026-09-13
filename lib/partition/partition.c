@@ -8,13 +8,18 @@
 #include "lib/partition.h"
 
 #include <lk/debug.h>
+#include <lk/err.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 #include <lk/compiler.h>
 #include <stdlib.h>
 #include <arch.h>
+#include <endian.h>
 #include <lib/bio.h>
 #include <assert.h>
+
+#include "partition_priv.h"
 
 struct chs {
     uint8_t c;
@@ -36,6 +41,9 @@ static status_t validate_mbr_partition(bdev_t *dev, const struct mbr_part *part)
     /* check for invalid types */
     if (part->type == 0)
         return -1;
+    /* the protective entry covering a GPT is not a partition */
+    if (part->type == MBR_TYPE_GPT_PROTECTIVE)
+        return -1;
     /* check for invalid status */
     if (part->status != 0x80 && part->status != 0x00)
         return -1;
@@ -43,7 +51,7 @@ static status_t validate_mbr_partition(bdev_t *dev, const struct mbr_part *part)
     /* make sure the range fits within the device */
     if (part->lba_start >= dev->block_count)
         return -1;
-    if ((part->lba_start + part->lba_length) > dev->block_count)
+    if ((uint64_t)part->lba_start + part->lba_length > dev->block_count)
         return -1;
 
     /* that's about all we can do, MBR has no other good way to see if it's valid */
@@ -73,7 +81,7 @@ int partition_publish(const char *device, off_t offset) {
 
         err = bio_read(dev, buf, offset, 512);
         if (err < 0)
-            goto err;
+            break;
 
         /* look for the aa55 tag */
         if (buf[510] != 0x55 || buf[511] != 0xaa)
@@ -83,12 +91,34 @@ int partition_publish(const char *device, off_t offset) {
         struct mbr_part part[4];
         memcpy(part, buf + 446, sizeof(part));
 
+        bool protective = false;
+        for (i=0; i < 4; i++) {
+            part[i].lba_start = LE32(part[i].lba_start);
+            part[i].lba_length = LE32(part[i].lba_length);
+            if (part[i].type == MBR_TYPE_GPT_PROTECTIVE)
+                protective = true;
+        }
+
 #if LK_DEBUGLEVEL >= INFO
         dprintf(INFO, "mbr partition table dump:\n");
         for (i=0; i < 4; i++) {
             dprintf(INFO, "\t%i: status 0x%hhx, type 0x%hhx, start 0x%x, len 0x%x\n", i, part[i].status, part[i].type, part[i].lba_start, part[i].lba_length);
         }
 #endif
+
+        /* A protective entry means the real table is a GPT. GPT LBAs are absolute, so only
+         * a table at the start of the device can be one. Without a usable GPT, any other
+         * entries in the MBR are published below. */
+        if (protective && offset == 0) {
+            err = gpt_publish(dev, device);
+            if (err >= 0) {
+                count = err;
+                break;
+            }
+            if (err != ERR_NOT_FOUND)
+                break;
+            err = 0;
+        }
 
         /* validate each of the partition entries */
         for (i=0; i < 4; i++) {
@@ -114,7 +144,6 @@ int partition_publish(const char *device, off_t offset) {
         dprintf(INFO, "partition_publish: %u partition%s found\n", count, (count == 1) ? "" : "s");
     }
 
-err:
     return (err < 0) ? err : count;
 }
 
@@ -125,8 +154,8 @@ int partition_unpublish(const char *device) {
     char devname[512];
 
     count = 0;
-    for (i=0; i < 16; i++) {
-        sprintf(devname, "%sp%d", device, i);
+    for (i=0; i < PARTITION_MAX_SLOTS; i++) {
+        snprintf(devname, sizeof(devname), "%sp%d", device, i);
 
         dev = bio_open(devname);
         if (!dev)
@@ -139,4 +168,3 @@ int partition_unpublish(const char *device) {
 
     return count;
 }
-
