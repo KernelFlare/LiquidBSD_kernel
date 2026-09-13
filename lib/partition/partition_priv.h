@@ -58,9 +58,30 @@ struct gpt_entry {
 };
 static_assert(sizeof(struct gpt_entry) == GPT_ENTRY_MIN_SIZE, "");
 
+// A GUID in on-disk byte order from its canonical 8-4-4-4-12 hex fields.
+#define GPT_GUID(a, b, c, d, e)                                                                    \
+    {                                                                                              \
+        (a) & 0xff,         ((a) >> 8) & 0xff,  ((a) >> 16) & 0xff, ((a) >> 24) & 0xff,            \
+        (b) & 0xff,         ((b) >> 8) & 0xff,  (c) & 0xff,         ((c) >> 8) & 0xff,             \
+        ((d) >> 8) & 0xff,  (d) & 0xff,         ((e) >> 40) & 0xff, ((e) >> 32) & 0xff,            \
+        ((e) >> 24) & 0xff, ((e) >> 16) & 0xff, ((e) >> 8) & 0xff,  (e) & 0xff,                    \
+    }
+
+// canonical text form plus the terminator
+#define GPT_GUID_STR_LEN 37
+
+void gpt_format_guid(char *buf, size_t len, const uint8_t *guid);
+
 // Publishes the partitions in the GPT on dev as subdevices of device, falling back to the
 // backup table in the last block if the primary is invalid. Returns the number published,
 // or ERR_NOT_FOUND if neither table is usable.
 int gpt_publish(bdev_t *dev, const char *device);
+
+// Prints both GPT headers and the entries of the one gpt_publish() would use. protective
+// says whether the MBR has the entry gpt_publish() requires.
+void gpt_dump(bdev_t *dev, bool protective);
+
+// Formats bytes with a binary unit, e.g. "8.0 MiB".
+void partition_format_size(char *buf, size_t len, uint64_t bytes);
 
 __END_CDECLS

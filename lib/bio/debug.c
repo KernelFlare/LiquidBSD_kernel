@@ -56,6 +56,7 @@ usage:
         printf("%s test <device> *destructive*\n", argv[0].str);
 #if WITH_LIB_PARTITION
         printf("%s partscan <device> [offset]\n", argv[0].str);
+        printf("%s partdump <device> [offset]\n", argv[0].str);
 #endif
 #if WITH_LIB_CKSUM
         printf("%s crc32 <device> <offset> <len> [repeat]\n", argv[0].str);
@@ -257,6 +258,17 @@ usage:
 
         rc = partition_publish(argv[2].str, offset);
         dprintf(INFO, "partition_publish returns %d\n", rc);
+    } else if (!strcmp(argv[1].str, "partdump")) {
+        if (argc < 3) {
+            goto notenoughargs;
+        }
+
+        off_t offset = 0;
+        if (argc > 3) {
+            offset = argv[3].u;
+        }
+
+        rc = partition_dump(argv[2].str, offset);
 #endif
 #if WITH_LIB_CKSUM
     } else if (!strcmp(argv[1].str, "crc32")) {

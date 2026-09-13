@@ -284,8 +284,62 @@ static bool mbr_basic(void) {
     END_TEST;
 }
 
+static bool gpt_requires_protective_mbr(void) {
+    BEGIN_TEST;
+
+    uint8_t *disk = disk_create();
+    ASSERT_NONNULL(disk, "");
+    build_gpt(disk, basic_parts, countof(basic_parts));
+    memset(disk, 0, BLOCK_SIZE);
+
+    EXPECT_EQ(0, partition_publish(DISK_NAME, 0), "");
+    EXPECT_FALSE(part_exists(0), "");
+
+    disk_destroy(disk);
+    END_TEST;
+}
+
+static bool gpt_guid_format(void) {
+    BEGIN_TEST;
+
+    const uint8_t guid[16] = GPT_GUID(0x0fc63daf, 0x8483, 0x4772, 0x8e79, 0x3d69d8477de4ULL);
+    EXPECT_BYTES_EQ(test_type_guid, guid, sizeof(guid), "");
+
+    char buf[GPT_GUID_STR_LEN];
+    gpt_format_guid(buf, sizeof(buf), guid);
+    EXPECT_EQ(0, strcmp("0FC63DAF-8483-4772-8E79-3D69D8477DE4", buf), buf);
+
+    END_TEST;
+}
+
+static bool partition_dump_publishes_nothing(void) {
+    BEGIN_TEST;
+
+    const struct test_part parts[] = {
+        { 0, FIRST_USABLE, 49 },
+        { 3, 70, 65 },
+    };
+
+    uint8_t *disk = disk_create();
+    ASSERT_NONNULL(disk, "");
+    build_gpt(disk, parts, countof(parts));
+    // walks the backup path and the invalid entry path while printing
+    block(disk, 1)[offsetof(struct gpt_header, first_usable_lba)] ^= 1;
+
+    EXPECT_EQ(0, partition_dump(DISK_NAME, 0), "");
+    EXPECT_FALSE(part_exists(0), "");
+    EXPECT_FALSE(part_exists(3), "");
+    EXPECT_EQ(ERR_NOT_FOUND, partition_dump("parttest-missing", 0), "");
+
+    disk_destroy(disk);
+    END_TEST;
+}
+
 BEGIN_TEST_CASE(partition_tests)
 RUN_TEST(gpt_basic)
+RUN_TEST(gpt_requires_protective_mbr)
+RUN_TEST(gpt_guid_format)
+RUN_TEST(partition_dump_publishes_nothing)
 RUN_TEST(gpt_bad_primary_header)
 RUN_TEST(gpt_bad_primary_entries)
 RUN_TEST(gpt_no_valid_table)
