@@ -673,9 +673,24 @@ typedef struct tcp_header_inject {
     uint16_t urg_pointer;
 } __PACKED tcp_header_inject_t;
 
+/* struct ipv4_hdr carries the payload as a flexible array member, so it cannot
+ * sit ahead of another field; this is the same header with nothing trailing it */
+typedef struct ipv4_header_inject {
+    uint8_t  ver_ihl;
+    uint8_t  dscp_ecn;
+    uint16_t len;
+    uint16_t id;
+    uint16_t flags_frags;
+    uint8_t  ttl;
+    uint8_t  proto;
+    uint16_t chksum;
+    uint32_t src_addr;
+    uint32_t dst_addr;
+} __PACKED ipv4_header_inject_t;
+
 struct inject_frame {
     struct eth_hdr eth;
-    struct ipv4_hdr ip;
+    ipv4_header_inject_t ip;
     tcp_header_inject_t tcp;
 } __PACKED;
 
