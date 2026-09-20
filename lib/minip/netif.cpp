@@ -26,17 +26,29 @@ static mutex_t lock = MUTEX_INITIAL_VALUE(lock);
 static netif_t loopback;
 
 static int loopback_tx_func(void *arg, pktbuf_t *p) {
-    LTRACEF("arg %p, pkt %p\n", arg, p);
-    return 0;
+    netif_t *n = (netif_t *)arg;
+
+    LTRACEF("netif %p, pkt %p, dlen %u\n", n, p, p->dlen);
+
+    /* Reflect the frame back into the stack. The receive path mutates
+     * frames in place (header byte swaps, consumes) and the transmit side
+     * may hold on to p (retransmit queues), so the receive side gets its
+     * own copy.
+     */
+    status_t err = minip_rx_driver_callback_copy(n, p->data, p->dlen);
+    pktbuf_free(p, true);
+
+    return (err < 0) ? err : 0;
 }
 
 void netif_init(void) {
     LTRACE;
 
     // loopback device
+    static const uint8_t loopback_mac[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
     netif_create(&loopback, "loopback");
     loopback.flags |= NETIF_FLAG_LOOPBACK;
-    netif_set_eth(&loopback, loopback_tx_func, NULL, bcast_mac);
+    netif_set_eth(&loopback, loopback_tx_func, &loopback, loopback_mac);
     netif_set_ipv4_addr(&loopback, IPV4(127, 0, 0, 1), 8);
     netif_register(&loopback);
 }
@@ -45,7 +57,7 @@ netif_t *netif_create(netif_t *n, const char *name) {
     LTRACEF("n %p\n", n);
 
     if (!n) {
-        n = malloc(sizeof(netif_t));
+        n = (netif_t *)malloc(sizeof(netif_t));
     }
     if (!n) {
         return NULL;
@@ -54,6 +66,7 @@ netif_t *netif_create(netif_t *n, const char *name) {
     memset(n, 0, sizeof(*n));
 
     n->magic = NETIF_MAGIC;
+    mutex_init(&n->tx_lock);
     strlcpy(n->name, name, sizeof(n->name));
 
     return n;
@@ -125,6 +138,17 @@ status_t netif_set_ipv4_addr(netif_t *n, ipv4_addr_t addr, uint8_t subnet_width)
     ipv4_add_route(netif_get_network_ipv4(n), netif_get_netmask_ipv4(n), n);
 
     return NO_ERROR;
+}
+
+status_t netif_tx(netif_t *n, pktbuf_t *p) {
+    DEBUG_ASSERT(n->magic == NETIF_MAGIC);
+    DEBUG_ASSERT(n->tx_func);
+
+    mutex_acquire(&n->tx_lock);
+    status_t err = n->tx_func(n->tx_func_arg, p);
+    mutex_release(&n->tx_lock);
+
+    return err;
 }
 
 void netif_dump(void) {

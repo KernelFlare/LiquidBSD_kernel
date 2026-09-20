@@ -13,21 +13,44 @@
 
 __BEGIN_CDECLS
 
-/* PAGE_SIZE minus 16 bytes of metadata in pktbuf_buf */
+struct netif;
+
+/* Number of packet data buffers in the pool. Each is PKTBUF_SIZE bytes.
+ * pktbuf headers are allocated from a separate, smaller pool.
+ */
 #ifndef PKTBUF_POOL_SIZE
 #define PKTBUF_POOL_SIZE 256
 #endif
 
-/* Reserve this many pktbuf pool objects for non-RX-ring traffic by default.
- * Since pktbuf_alloc() consumes two pool objects (header + buffer), this keeps
- * space for TX/control traffic such as ARP/DHCP.
+/* Reserve this many pool data buffers for non-RX-ring traffic by default,
+ * keeping space for TX/control traffic such as ARP/DHCP.
  */
-#ifndef PKTBUF_ETH_RX_POOL_RESERVE_OBJECTS
-#define PKTBUF_ETH_RX_POOL_RESERVE_OBJECTS 64
+#ifndef PKTBUF_ETH_RX_POOL_RESERVE
+#define PKTBUF_ETH_RX_POOL_RESERVE 64
+#endif
+
+/* Extra pktbuf headers on top of one per data buffer, for headers that wrap
+ * externally owned (driver) buffers via pktbuf_add_buffer().
+ */
+#ifndef PKTBUF_EXTRA_HEADERS
+#define PKTBUF_EXTRA_HEADERS 64
 #endif
 
 #ifndef PKTBUF_SIZE
 #define PKTBUF_SIZE     1536
+#endif
+
+/* Ceiling for on-demand pool growth, in packets. The pool starts at
+ * PKTBUF_POOL_SIZE and grows in chunks as blocking allocations find it
+ * exhausted, up to this cap. Fixed at PKTBUF_POOL_SIZE on LK_EMBEDDED
+ * targets, where the growth path compiles out entirely.
+ */
+#ifndef PKTBUF_POOL_MAX
+#if LK_EMBEDDED
+#define PKTBUF_POOL_MAX PKTBUF_POOL_SIZE
+#else
+#define PKTBUF_POOL_MAX (4 * PKTBUF_POOL_SIZE)
+#endif
 #endif
 
 /* How much space pktbuf_alloc should save for IP headers in the front of the buffer */
@@ -35,7 +58,7 @@ __BEGIN_CDECLS
 /* The remaining space in the buffer */
 #define PKTBUF_MAX_DATA (PKTBUF_SIZE - PKTBUF_MAX_HDR)
 
-typedef void (*pktbuf_free_callback)(void *buf, void *arg);
+typedef void (*pktbuf_free_callback)(void *buf, void *arg, bool reschedule);
 typedef struct pktbuf {
     u8 *data;
     u32 blen;
@@ -43,17 +66,13 @@ typedef struct pktbuf {
     paddr_t phys_base;
     struct list_node list;
     u32 flags;
+    int ref;                // reference count, adjusted atomically
+    u32 seq;                // per-layer scratch (e.g. TCP sequence number)
+    struct netif *netif;    // receiving interface, set by the stack input queue
     pktbuf_free_callback cb;
     void *cb_args;
     u8 *buffer;
 } pktbuf_t;
-
-typedef struct pktbuf_pool_object {
-    union {
-        pktbuf_t p;
-        uint8_t b[PKTBUF_SIZE];
-    };
-} pktbuf_pool_object_t;
 
 #define PKTBUF_FLAG_CKSUM_IP_GOOD  (1<<0)
 #define PKTBUF_FLAG_CKSUM_TCP_GOOD (1<<1)
@@ -76,17 +95,34 @@ static inline u32 pktbuf_avail_tail(pktbuf_t *p) {
     return p->blen - (p->data - p->buffer) - p->dlen;
 }
 
-// allocate packet buffer from buffer pool
+// allocate a packet buffer from the pool, with PKTBUF_MAX_HDR bytes of
+// headroom reserved for prepending headers.
+// non-blocking and callable from interrupt context; returns NULL if the
+// pool is exhausted.
 pktbuf_t *pktbuf_alloc(void);
+
+// as pktbuf_alloc, but block up to timeout for a buffer to become
+// available. thread context only.
+pktbuf_t *pktbuf_alloc_timeout(lk_time_t timeout);
+
+// as pktbuf_alloc, but set up for driver RX DMA: data starts at the
+// beginning of the buffer with no headroom reserved.
+pktbuf_t *pktbuf_alloc_rx(void);
+
+// allocate a bare pktbuf header with no data buffer, for wrapping an
+// externally owned buffer via pktbuf_add_buffer().
 pktbuf_t *pktbuf_alloc_empty(void);
 
 /* Add a buffer to an existing packet buffer */
 void pktbuf_add_buffer(pktbuf_t *p, u8 *buf, u32 len, uint32_t header_sz,
                        uint32_t flags, pktbuf_free_callback cb, void *cb_args);
 
-// return packet buffer to buffer pool
-// returns number of threads woken up
-int pktbuf_free(pktbuf_t *p, bool reschedule);
+// take an additional reference on the packet buffer
+void pktbuf_ref(pktbuf_t *p);
+
+// drop a reference; when the last reference is dropped the buffer free
+// callback runs and the header returns to the pool
+void pktbuf_free(pktbuf_t *p, bool reschedule);
 
 // extend buffer by sz bytes, copied from data
 void pktbuf_append_data(pktbuf_t *p, const void *data, size_t sz);
@@ -114,17 +150,22 @@ void pktbuf_consume_tail(pktbuf_t *p, size_t sz);
 // be within the buffer.
 void pktbuf_reset(pktbuf_t *p, uint32_t header_sz);
 
-// create a new packet buffer from raw memory and add
-// it to the free pool
-void pktbuf_create(void *ptr, size_t size);
-
-// Create buffers for pktbufs of size PKTBUF_BUF_SIZE out of size
-void pktbuf_create_bufs(void *ptr, size_t size);
-
 void pktbuf_dump(pktbuf_t *p);
 
-// Return a safe ethernet RX preallocation depth based on pool capacity.
-// Each RX descriptor that uses pktbuf_alloc() consumes two pool objects.
+// pool statistics snapshot
+typedef struct pktbuf_stats {
+    size_t bufs_total;    // data buffers created so far
+    size_t bufs_free;     // currently in the pool
+    size_t bufs_free_low; // low water mark of bufs_free
+    size_t bufs_max;      // growth ceiling (PKTBUF_POOL_MAX)
+    size_t hdrs_total;
+    size_t hdrs_free;
+} pktbuf_stats_t;
+
+void pktbuf_get_stats(pktbuf_stats_t *stats);
+
+// Return a safe ethernet RX preallocation depth based on pool capacity,
+// leaving PKTBUF_ETH_RX_POOL_RESERVE data buffers for other traffic.
 // The returned value is clamped to requested_depth.
 size_t pktbuf_recommended_eth_rx_depth(size_t requested_depth);
 

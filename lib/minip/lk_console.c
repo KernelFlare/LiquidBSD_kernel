@@ -33,7 +33,12 @@ static int cmd_arp(int argc, const console_cmd_args *argv) {
         arp_cache_dump();
     } else if (argc == 3 && strncmp(cmd, "query", sizeof("query")) == 0) {
         const char *addr_s = argv[2].str;
-        uint32_t addr = minip_parse_ipaddr(addr_s, strlen(addr_s));
+        ipv4_addr_t addr;
+
+        if (minip_parse_ipaddr_checked(addr_s, strlen(addr_s), &addr) < 0) {
+            printf("bad ipv4 address '%s'\n", addr_s);
+            return -1;
+        }
 
         arp_get_dest_mac(addr);
     } else {
@@ -51,9 +56,34 @@ minip_usage:
         printf("mi [i]interfaces                dump interface list\n");
         printf("mi [r]outes                     dump routing table\n");
         printf("mi [s]tatus                     print ip status\n");
+        printf("mi [d]ns <hostname>             resolve a host name\n");
         printf("mi [t]est [dest] [port] [cnt]   send <cnt> test packets to the dest:port\n");
     } else {
-        switch (argv[1].str[0]) {
+        const char *cmd = argv[1].str;
+        char sel = cmd[0];
+
+        /* Dispatch on the whole word when one is given: matching on the
+         * first letter alone made 'mi trace' run the packet blast test.
+         */
+        if (cmd[1] != '\0') {
+            if (!strcmp(cmd, "trace")) {
+                sel = 'c';
+            } else if (!strcmp(cmd, "interfaces")) {
+                sel = 'i';
+            } else if (!strcmp(cmd, "routes")) {
+                sel = 'r';
+            } else if (!strcmp(cmd, "status")) {
+                sel = 's';
+            } else if (!strcmp(cmd, "dns")) {
+                sel = 'd';
+            } else if (!strcmp(cmd, "test")) {
+                sel = 't';
+            } else {
+                goto minip_usage;
+            }
+        }
+
+        switch (sel) {
             case 'c':
                 minip_trace = !minip_trace;
                 printf("packet tracing: %s\n", minip_trace ? "enabled" : "disabled");
@@ -67,11 +97,29 @@ minip_usage:
             case 's':
                 printf("hostname: %s\n", minip_get_hostname());
                 printf("gateway: %u.%u.%u.%u\n", IPV4_SPLIT(minip_get_gateway()));
+                printf("dns server: %u.%u.%u.%u\n", IPV4_SPLIT(minip_get_dns_server()));
                 printf("interfaces:\n");
                 netif_dump();
                 printf("ipv4 routing table:\n");
                 dump_ipv4_route_table();
                 break;
+            case 'd': {
+                if (argc < 3) {
+                    goto minip_usage;
+                }
+
+                ipv4_addr_t addr;
+                lk_time_t t = current_time();
+                status_t err = dns_resolve(argv[2].str, &addr, DNS_DEFAULT_TIMEOUT);
+                t = current_time() - t;
+
+                if (err < 0) {
+                    printf("failed to resolve '%s': %d\n", argv[2].str, err);
+                    return err;
+                }
+                printf("%s is %u.%u.%u.%u (%u ms)\n", argv[2].str, IPV4_SPLIT(addr), t);
+                break;
+            }
             case 't': {
                 uint32_t count = 1;
                 uint32_t host = 0x0100000A; // 10.0.0.1
@@ -86,7 +134,10 @@ minip_usage:
                         port = argv[3].u;
                     /* fallthrough */
                     case 3:
-                        host = minip_parse_ipaddr(argv[2].str, strlen(argv[2].str));
+                        if (minip_resolve(argv[2].str, &host) < 0) {
+                            printf("failed to resolve '%s'\n", argv[2].str);
+                            return -1;
+                        }
                         break;
                 }
 
@@ -135,8 +186,6 @@ minip_usage:
 
     return 0;
 }
-
-extern int cmd_tcp(int argc, const console_cmd_args *argv);
 
 STATIC_COMMAND_START
 STATIC_COMMAND("arp", "arp commands", &cmd_arp)

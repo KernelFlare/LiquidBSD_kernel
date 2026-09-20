@@ -18,9 +18,14 @@
 
 __BEGIN_CDECLS
 
-#define IPV4(a,b,c,d) (((a)&0xFF)|(((b)&0xFF)<<8)|(((c)&0xFF)<<16)|(((d)&0xFF)<<24))
+/* note: the octets are cast to uint32_t before shifting; shifting a value of
+ * 128 or more left by 24 as an int is undefined behavior.
+ */
+#define IPV4(a,b,c,d) (((uint32_t)(a)&0xFF)|(((uint32_t)(b)&0xFF)<<8)| \
+                       (((uint32_t)(c)&0xFF)<<16)|(((uint32_t)(d)&0xFF)<<24))
 #define IPV4_SPLIT(a) (a & 0xFF), ((a >> 8) & 0xFF), ((a >> 16) & 0xFF), ((a >> 24) & 0xFF)
-#define IPV4_PACK(a) (a[3] << 24 | a[2] << 16 | a[1] << 8 | a[0])
+#define IPV4_PACK(a) (((uint32_t)(a)[3] << 24) | ((uint32_t)(a)[2] << 16) | \
+                      ((uint32_t)(a)[1] << 8) | (uint32_t)(a)[0])
 #define IPV4_BCAST (0xFFFFFFFF)
 #define IPV4_NONE (0)
 
@@ -42,12 +47,25 @@ void minip_start_dhcp(netif_t *);
 bool minip_is_configured(void);
 status_t minip_wait_for_configured(lk_time_t timeout);
 
-/* packet rx hook to hand to ethernet driver */
-void minip_rx_driver_callback(netif_t *netif, pktbuf_t *p);
+/* Hand a received ethernet frame to the stack; ownership of the pktbuf
+ * transfers to the stack, which processes it on its own thread and frees
+ * it (returning driver owned buffers via their free callback). The driver
+ * must not touch p again after this call. IRQ safe and non blocking.
+ */
+void minip_rx_pktbuf(netif_t *netif, pktbuf_t *p);
+
+/* As minip_rx_pktbuf, but copies the frame into a pool pktbuf first, for
+ * drivers that cannot give their receive buffer away. Drops the frame and
+ * returns ERR_NO_MEMORY when the pool is exhausted.
+ */
+status_t minip_rx_driver_callback_copy(netif_t *netif, const void *frame, size_t len);
+
 
 /* global configuration state */
 uint32_t minip_get_gateway(void);
 void minip_set_gateway(const ipv4_addr_t addr);
+ipv4_addr_t minip_get_dns_server(void);
+void minip_set_dns_server(const ipv4_addr_t addr);
 void minip_set_hostname(const char *name);
 const char *minip_get_hostname(void);
 void minip_set_configured(void); // set by dhcp or static init to signal minip is ready to be used
@@ -76,8 +94,28 @@ static inline status_t tcp_accept(tcp_socket_t *listen_socket, tcp_socket_t **ac
     return tcp_accept_timeout(listen_socket, accept_socket, INFINITE_TIME);
 }
 
+/* dns */
+#define DNS_DEFAULT_TIMEOUT 5000
+
+/* Resolve a host name to an address, blocking until an answer arrives or
+ * the timeout expires. Answers are cached for their TTL. Must not be called
+ * from the netstack thread, which is what delivers the reply.
+ */
+status_t dns_resolve(const char *name, ipv4_addr_t *out, lk_time_t timeout);
+void dns_cache_flush(void);
+
+/* Accept either a literal dotted quad or a host name to resolve. */
+status_t minip_resolve(const char *host, ipv4_addr_t *out);
+
 /* utilities */
 void gen_random_mac_address(uint8_t *mac_addr);
+
+/* parse a dotted quad. rejects anything that is not exactly four decimal
+ * octets, so it doubles as the "is this a literal address?" test.
+ */
+status_t minip_parse_ipaddr_checked(const char *addr, size_t len, ipv4_addr_t *out);
+
+/* as above, but returns IPV4_NONE if the string does not parse */
 ipv4_addr_t minip_parse_ipaddr(const char *addr, size_t len);
 void print_mac_address(const uint8_t *mac);
 void print_ipv4_address(ipv4_addr_t x);

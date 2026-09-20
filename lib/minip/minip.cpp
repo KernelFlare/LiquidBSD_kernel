@@ -35,6 +35,7 @@
 bool minip_trace = (LOCAL_TRACE != 0);
 
 static ipv4_addr_t minip_gateway = IPV4_NONE;
+static ipv4_addr_t minip_dns_server = IPV4_NONE;
 
 static char minip_hostname[32] = "";
 
@@ -79,6 +80,14 @@ const char *minip_get_hostname(void) {
 
 uint32_t minip_get_gateway(void) {
     return minip_gateway;
+}
+
+ipv4_addr_t minip_get_dns_server(void) {
+    return minip_dns_server;
+}
+
+void minip_set_dns_server(const ipv4_addr_t addr) {
+    minip_dns_server = addr;
 }
 
 void minip_set_gateway(const ipv4_addr_t addr) {
@@ -274,50 +283,67 @@ static void minip_build_ipv4_hdr(netif_t *netif, struct ipv4_hdr *ipv4, ipv4_add
     ipv4->chksum = ~ones_sum16(0, (uint8_t *) ipv4, sizeof(struct ipv4_hdr));
 }
 
+/* prepend the ethernet and ipv4 headers on a payload */
+static void minip_ipv4_build(netif_t *netif, pktbuf_t *p, ipv4_addr_t dest_addr, uint8_t proto,
+                             const uint8_t *dest_mac) {
+    size_t data_len = p->dlen;
+
+    struct ipv4_hdr *ip = (struct ipv4_hdr *)pktbuf_prepend(p, sizeof(struct ipv4_hdr));
+    struct eth_hdr *eth = (struct eth_hdr *)pktbuf_prepend(p, sizeof(struct eth_hdr));
+
+    minip_build_mac_hdr(netif, eth, dest_mac, ETH_TYPE_IPV4);
+    minip_build_ipv4_hdr(netif, ip, dest_addr, proto, data_len);
+}
+
 status_t minip_ipv4_send_raw(pktbuf_t *p, ipv4_addr_t dest_addr, uint8_t proto, const uint8_t *dest_mac, netif_t *netif) {
     DEBUG_ASSERT(p);
     DEBUG_ASSERT(netif);
-
-    size_t data_len = p->dlen;
-
-    struct ipv4_hdr *ip = pktbuf_prepend(p, sizeof(struct ipv4_hdr));
-    struct eth_hdr *eth = pktbuf_prepend(p, sizeof(struct eth_hdr));
 
     if (LOCAL_TRACE) {
         printf("sending ipv4\n");
     }
 
-    minip_build_mac_hdr(netif, eth, dest_mac, ETH_TYPE_IPV4);
-    minip_build_ipv4_hdr(netif, ip, dest_addr, proto, data_len);
+    minip_ipv4_build(netif, p, dest_addr, proto, dest_mac);
 
-    return netif->tx_func(netif->tx_func_arg, p);
+    return netif_tx(netif, p);
 }
 
 status_t minip_ipv4_send(pktbuf_t *p, ipv4_addr_t dest_addr, uint8_t proto) {
     status_t ret = 0;
+    netif_t *netif = NULL;
+    const uint8_t *dest_mac = NULL;
+    ipv4_addr_t target_addr = dest_addr;
+    ipv4_addr_t netmask;
 
     // TODO: cache route at socket creation
     ipv4_route_t *route = ipv4_search_route(dest_addr);
     if (!route) {
+        /* like every other outcome, consume the caller's reference */
+        pktbuf_free(p, true);
         ret = -EHOSTUNREACH;
         goto err;
     }
     DEBUG_ASSERT(route->interface);
-    netif_t *netif = route->interface;
+    netif = route->interface;
 
     // are we sending a broadcast packet?
-    const uint8_t *dest_mac;
     if (dest_addr == IPV4_BCAST || dest_addr == netif_get_broadcast_ipv4(netif)) {
         dest_mac = bcast_mac;
         goto ready;
     }
 
+    // loopback needs no arp; address the frame to our own mac
+    if (netif_is_loopback(netif)) {
+        dest_mac = netif->mac_address;
+        goto ready;
+    }
+
     // is this a local subnet packet or do we need to send to the router?
-    ipv4_addr_t target_addr = dest_addr;
-    ipv4_addr_t netmask = netif_get_netmask_ipv4(netif);
+    netmask = netif_get_netmask_ipv4(netif);
     if ((dest_addr & netmask) != (netif->ipv4_addr & netmask)) {
         // need to use the gateway
         if (minip_gateway == IPV4_NONE) {
+            pktbuf_free(p, true);
             ret = ERR_NOT_FOUND; // TODO: better error code
             goto err;
         }
@@ -325,10 +351,20 @@ status_t minip_ipv4_send(pktbuf_t *p, ipv4_addr_t dest_addr, uint8_t proto) {
         target_addr = minip_gateway;
     }
 
-    dest_mac = arp_get_dest_mac(target_addr);
-    if (!dest_mac) {
-        pktbuf_free(p, true);
-        ret = -EHOSTUNREACH;
+    // fast path: address already resolved
+    dest_mac = arp_cache_lookup(target_addr);
+    if (dest_mac) {
+        goto ready;
+    }
+
+    /* the mac is not known yet: build the frame with a placeholder mac and
+     * hand it to the arp layer, which fills it in and transmits when the
+     * address resolves (or drops it if resolution fails). never blocks.
+     */
+    {
+        static const uint8_t zero_mac[6] = { 0, 0, 0, 0, 0, 0 };
+        minip_ipv4_build(netif, p, dest_addr, proto, zero_mac);
+        ret = arp_send_or_queue(netif, target_addr, p);
         goto err;
     }
 
@@ -357,9 +393,9 @@ static void send_ping_reply(netif_t *netif, uint32_t ipaddr, struct icmp_pkt *re
         return;
     }
 
-    icmp = pktbuf_prepend(p, sizeof(struct icmp_pkt));
-    ip = pktbuf_prepend(p, sizeof(struct ipv4_hdr));
-    eth = pktbuf_prepend(p, sizeof(struct eth_hdr));
+    icmp = (struct icmp_pkt *)pktbuf_prepend(p, sizeof(struct icmp_pkt));
+    ip = (struct ipv4_hdr *)pktbuf_prepend(p, sizeof(struct ipv4_hdr));
+    eth = (struct eth_hdr *)pktbuf_prepend(p, sizeof(struct eth_hdr));
     pktbuf_append_data(p, req->data, reqdatalen);
 
     len = sizeof(struct icmp_pkt) + reqdatalen;
@@ -373,7 +409,7 @@ static void send_ping_reply(netif_t *netif, uint32_t ipaddr, struct icmp_pkt *re
     icmp->chksum = 0;
     icmp->chksum = ~ones_sum16(0, (uint8_t *) icmp, len);
 
-    netif->tx_func(netif->tx_func_arg, p);
+    netif_tx(netif, p);
 }
 
 __NO_INLINE static void dump_ipv4_packet(const struct ipv4_hdr *ip) {
@@ -385,13 +421,14 @@ __NO_INLINE static void dump_ipv4_packet(const struct ipv4_hdr *ip) {
            (ip->ver_ihl & 0xf) * 4, ip->proto, ntohs(ip->chksum), ntohs(ip->len), ntohs(ip->id), ntohs(ip->flags_frags) & 0x1fff);
 }
 
-__NO_INLINE static void handle_ipv4_packet(netif_t *netif, pktbuf_t *p, const uint8_t *src_mac) {
+/* returns true if ownership of p was taken by a protocol layer */
+__NO_INLINE static bool handle_ipv4_packet(netif_t *netif, pktbuf_t *p, const uint8_t *src_mac) {
     struct ipv4_hdr *ip;
 
     ip = (struct ipv4_hdr *)p->data;
     if (p->dlen < sizeof(struct ipv4_hdr)) {
         LTRACEF("REJECT: packet too short to hold header\n");
-        return;
+        return false;
     }
 
     /* print packets for us */
@@ -403,27 +440,27 @@ __NO_INLINE static void handle_ipv4_packet(netif_t *netif, pktbuf_t *p, const ui
     if (((ip->ver_ihl >> 4) & 0xf) != 4) {
         /* not version 4 */
         LTRACEF("REJECT: not version 4\n");
-        return;
+        return false;
     }
 
     /* do we have enough buffer to hold the full header + options? */
     size_t header_len = (ip->ver_ihl & 0xf) * 4;
     if (p->dlen < header_len) {
         LTRACEF("REJECT: not enough buffer to hold header\n");
-        return;
+        return false;
     }
 
     /* compute checksum */
-    if (ones_sum16(0, (void *)ip, header_len) == 0) {
+    if (ones_sum16(0, (void *)ip, header_len) != 0xffff) {
         /* bad checksum */
         LTRACEF("REJECT: bad checksum\n");
-        return;
+        return false;
     }
 
     /* is the pkt_buf large enough to hold the length the header says the packet is? */
     if (htons(ip->len) > p->dlen) {
         LTRACEF("REJECT: packet exceeds size of buffer (header %d, dlen %d)\n", htons(ip->len), p->dlen);
-        return;
+        return false;
     }
 
     /* trim any excess bytes at the end of the packet */
@@ -433,17 +470,22 @@ __NO_INLINE static void handle_ipv4_packet(netif_t *netif, pktbuf_t *p, const ui
 
     /* remove the header from the front of the packet_buf  */
     if (pktbuf_consume(p, header_len) == NULL) {
-        return;
+        return false;
     }
 
-    /* the packet is good, we can use it to populate our arp cache */
-    arp_cache_update(ip->src_addr, src_mac);
+    /* The packet is good, so use it to populate the arp cache -- except on
+     * loopback and for 127/8 sources, which are not ethernet neighbors
+     * (some NATs leak host-loopback-sourced frames onto the wire).
+     */
+    if (!netif_is_loopback(netif) && (ip->src_addr & 0xff) != 127) {
+        arp_cache_update(ip->src_addr, src_mac);
+    }
 
     /* see if it's for us */
     if (ip->dst_addr != IPV4_BCAST) {
         if (netif->ipv4_addr != IPV4_NONE && ip->dst_addr != netif->ipv4_addr && ip->dst_addr != netif_get_broadcast_ipv4(netif)) {
             LTRACEF("REJECT: for another host\n");
-            return;
+            return false;
         }
     }
 
@@ -451,7 +493,7 @@ __NO_INLINE static void handle_ipv4_packet(netif_t *netif, pktbuf_t *p, const ui
     switch (ip->proto) {
         case IP_PROTO_ICMP: {
             struct icmp_pkt *icmp;
-            if ((icmp = pktbuf_consume(p, sizeof(struct icmp_pkt))) == NULL) {
+            if ((icmp = (struct icmp_pkt *)pktbuf_consume(p, sizeof(struct icmp_pkt))) == NULL) {
                 break;
             }
             if (icmp->type == ICMP_ECHO_REQUEST) {
@@ -465,9 +507,10 @@ __NO_INLINE static void handle_ipv4_packet(netif_t *netif, pktbuf_t *p, const ui
             break;
 
         case IP_PROTO_TCP:
-            tcp_input(netif, p, ip->src_addr, ip->dst_addr);
-            break;
+            return tcp_input(netif, p, ip->src_addr, ip->dst_addr);
     }
+
+    return false;
 }
 
 static void dump_eth_packet(const struct eth_hdr *eth) {
@@ -478,15 +521,19 @@ static void dump_eth_packet(const struct eth_hdr *eth) {
     printf(" type 0x%hx\n", htons(eth->type));
 }
 
-void minip_rx_driver_callback(netif_t *netif, pktbuf_t *p) {
+/* main demux of a received frame, called on the stack worker thread.
+ * Returns true if ownership of p was taken by a protocol layer; otherwise
+ * the caller frees it.
+ */
+bool minip_rx_process(netif_t *netif, pktbuf_t *p) {
     DEBUG_ASSERT(netif);
     DEBUG_ASSERT(p);
 
     LTRACEF("netif %p, p %p, dlen %u\n", netif, p, p->dlen);
 
     struct eth_hdr *eth;
-    if ((eth = (void *) pktbuf_consume(p, sizeof(struct eth_hdr))) == NULL) {
-        return;
+    if ((eth = (struct eth_hdr *)pktbuf_consume(p, sizeof(struct eth_hdr))) == NULL) {
+        return false;
     }
 
     if (minip_trace) {
@@ -496,13 +543,12 @@ void minip_rx_driver_callback(netif_t *netif, pktbuf_t *p) {
     if (memcmp(eth->dst_mac, netif->mac_address, 6) != 0 &&
             memcmp(eth->dst_mac, bcast_mac, 6) != 0) {
         /* not for us */
-        return;
+        return false;
     }
 
     switch (htons(eth->type)) {
         case ETH_TYPE_IPV4:
-            handle_ipv4_packet(netif, p, eth->src_mac);
-            break;
+            return handle_ipv4_packet(netif, p, eth->src_mac);
 
         case ETH_TYPE_ARP:
             handle_arp_pkt(netif, p);
@@ -511,27 +557,67 @@ void minip_rx_driver_callback(netif_t *netif, pktbuf_t *p) {
             LTRACEF("unhandled pkt type %#hx\n", htons(eth->type));
             break;
     }
+
+    return false;
 }
 
 // utility routines
-uint32_t minip_parse_ipaddr(const char *ipaddr_str, size_t len) {
-    uint8_t ip[4] = { 0, 0, 0, 0 };
-    size_t pos = 0, i = 0;
 
-    while (pos < len) {
-        char c = ipaddr_str[pos];
-        if (c == '.') {
-            i++;
-        } else if (c == '\0') {
-            break;
-        } else {
-            ip[i] *= 10;
-            ip[i] += c - '0';
-        }
-        pos++;
+/* Parse a dotted quad. Anything that is not exactly four decimal octets is
+ * rejected, which is what lets callers use this to tell a literal address
+ * from a host name.
+ */
+status_t minip_parse_ipaddr_checked(const char *ipaddr_str, size_t len, ipv4_addr_t *out) {
+    if (!ipaddr_str || !out) {
+        return ERR_INVALID_ARGS;
     }
 
-    return IPV4_PACK(ip);
+    uint8_t ip[4] = { 0, 0, 0, 0 };
+    size_t octet = 0;
+    uint digits = 0;
+    uint val = 0;
+
+    for (size_t pos = 0; pos < len; pos++) {
+        char c = ipaddr_str[pos];
+
+        if (c == '\0') {
+            break;
+        } else if (c == '.') {
+            if (digits == 0 || octet >= 3) {
+                return ERR_NOT_VALID;
+            }
+            ip[octet++] = (uint8_t)val;
+            val = 0;
+            digits = 0;
+        } else if (c >= '0' && c <= '9') {
+            if (++digits > 3) {
+                return ERR_NOT_VALID;
+            }
+            val = val * 10 + (uint)(c - '0');
+            if (val > 255) {
+                return ERR_NOT_VALID;
+            }
+        } else {
+            return ERR_NOT_VALID;
+        }
+    }
+
+    if (digits == 0 || octet != 3) {
+        return ERR_NOT_VALID;
+    }
+    ip[3] = (uint8_t)val;
+
+    *out = IPV4_PACK(ip);
+    return NO_ERROR;
+}
+
+uint32_t minip_parse_ipaddr(const char *ipaddr_str, size_t len) {
+    ipv4_addr_t addr;
+
+    if (minip_parse_ipaddr_checked(ipaddr_str, len, &addr) != NO_ERROR) {
+        return IPV4_NONE;
+    }
+    return addr;
 }
 
 void print_mac_address(const uint8_t *mac) {
@@ -556,7 +642,7 @@ void print_ipv4_address_named(const char *s, ipv4_addr_t x) {
 // run static initialization
 static void minip_init(uint level) {
     arp_cache_init();
-    net_timer_init();
+    netstack_init();
     netif_init();
 }
 

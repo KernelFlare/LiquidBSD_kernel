@@ -12,10 +12,14 @@
 
 #include <lk/compiler.h>
 #include <endian.h>
+#include <stdbool.h>
+#include <lk/console_cmd.h>
 #include <lk/list.h>
 #include <stdint.h>
 #include <string.h>
 #include <lib/minip/netif.h>
+
+__BEGIN_CDECLS
 
 /* Lib configuration */
 #define MINIP_USE_UDP_CHECKSUM    1
@@ -100,6 +104,7 @@ void arp_cache_update(uint32_t addr, const uint8_t mac[6]);
 uint8_t *arp_cache_lookup(uint32_t addr);
 void arp_cache_dump(void);
 int arp_send_request(netif_t *, ipv4_addr_t addr);
+status_t arp_send_or_queue(netif_t *netif, ipv4_addr_t addr, pktbuf_t *p);
 const uint8_t *arp_get_dest_mac(uint32_t host);
 int handle_arp_pkt(netif_t *netif, pktbuf_t *p);
 
@@ -144,8 +149,72 @@ void minip_build_mac_hdr(netif_t *netif, struct eth_hdr *pkt, const uint8_t *dst
 status_t minip_ipv4_send(pktbuf_t *p, ipv4_addr_t dest_addr, uint8_t proto);
 status_t minip_ipv4_send_raw(pktbuf_t *p, ipv4_addr_t dest_addr, uint8_t proto, const uint8_t *dest_mac, netif_t *netif);
 
-void tcp_input(netif_t *netif, pktbuf_t *p, uint32_t src_ip, uint32_t dst_ip);
+/* returns true if ownership of p was taken; the caller frees it otherwise */
+bool tcp_input(netif_t *netif, pktbuf_t *p, uint32_t src_ip, uint32_t dst_ip);
 void udp_input(netif_t *netif, pktbuf_t *p, uint32_t src_ip);
+
+// console command backend (tcp.cpp), registered by lk_console.c
+int cmd_tcp(int argc, const console_cmd_args *argv);
+
+/* Per socket counters and estimator state. Nothing in the stack acts on
+ * these; they are what the unit tests and the console read to see what
+ * the retransmit logic actually did.
+ */
+typedef struct tcp_socket_stats {
+    uint32_t retransmits;       // segments resent because the timer expired
+    uint32_t fast_retransmits;  // segments resent on duplicate acks alone
+    uint32_t dupacks;           // duplicate acks received
+    uint32_t rto;               // current retransmit timeout, milliseconds
+    uint32_t srtt;              // smoothed round trip time, milliseconds
+    uint32_t cwnd;              // congestion window, bytes
+    uint32_t ssthresh;          // slow start threshold, bytes
+    uint32_t mss;               // segment size in use
+} tcp_socket_stats_t;
+
+void tcp_get_socket_stats(struct tcp_socket *s, tcp_socket_stats_t *out);
+
+// dhcp (dhcp.cpp)
+/* the handful of options minip acts on */
+typedef struct dhcp_options {
+    int op;                 /* message type (option 53), -1 if absent */
+    ipv4_addr_t netmask;    /* option 1 */
+    ipv4_addr_t gateway;    /* option 3, else the 0/0 route from option 121 */
+    ipv4_addr_t dns;        /* option 6, first server only */
+    ipv4_addr_t server;     /* option 54 */
+} dhcp_options_t;
+
+void dhcp_parse_options(const void *options, size_t len, dhcp_options_t *out);
+
+// dns (dns.cpp)
+#define DNS_TYPE_A      1
+#define DNS_TYPE_CNAME  5
+#define DNS_CLASS_IN    1
+
+/* One resource record, in whatever form minip can use. The type tag is what
+ * an AAAA answer would slot into later; today only A records are asked for.
+ */
+typedef struct dns_record {
+    uint16_t type;
+    uint32_t ttl;
+    ipv4_addr_t addr;   /* valid when type is DNS_TYPE_A */
+} dns_record_t;
+
+/* Message builder and parser. Pure functions over byte buffers, exposed
+ * here so the unit tests can drive them with canned packets.
+ */
+ssize_t dns_build_query(void *buf, size_t buflen, uint16_t id, const char *name, uint16_t type);
+status_t dns_parse_response(const void *buf, size_t len, uint16_t id, const char *name,
+                            dns_record_t *out);
+
+// stack worker (stack.cpp)
+void netstack_init(void);
+/* true if the caller is the stack worker thread; nothing running there may
+ * block waiting on work only the stack worker can do */
+bool netstack_is_stack_thread(void);
+// process one received frame on the stack thread (minip.cpp); returns true
+// if ownership of p was taken by a protocol layer, false if the caller
+// should free it
+bool minip_rx_process(netif_t *netif, pktbuf_t *p);
 
 // interface list
 void netif_init(void);
@@ -169,7 +238,6 @@ bool net_timer_set(net_timer_t *, net_timer_callback_t, void *callback_args, lk_
 /* cancels a net timer. returns true if it was previously set and is not now */
 bool net_timer_cancel(net_timer_t *) __NONNULL();
 
-void net_timer_init(void);
 
 static inline void mac_addr_copy(uint8_t *dest, const uint8_t *src) {
     memcpy(dest, src, 6);
@@ -177,3 +245,5 @@ static inline void mac_addr_copy(uint8_t *dest, const uint8_t *src) {
 
 // Whether to trace packet activity
 extern bool minip_trace;
+
+__END_CDECLS
