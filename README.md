@@ -1,4 +1,6 @@
-# The Little Kernel Embedded Operating System
+# LIQUIDBSD
+
+LiquidBSD 0.0-unrelease
 
 The LK kernel is an SMP-aware kernel designed for small systems ported to a variety of platforms and cpu architectures.
 
@@ -16,7 +18,7 @@ For comprehensive documentation, see [Index](docs/index.md).
 - Powerful modular build system
 - Large number of utility components selectable at build time
 
-## Supported architectures
+## Ports
 
 - ARM32
   - Cortex-M class cores (armv6m - armv8m)
@@ -28,13 +30,3 @@ For comprehensive documentation, see [Index](docs/index.md).
 - Motorola 68000
 - MIPS
 - VAX (experimental)
-
-## Command Completion
-
-To enable tab completion for LK projects and common build targets in Bash or Zsh, source the following script in your shell session:
-
-```bash
-source scripts/completion.sh
-```
-
-You can also add this line to your `~/.bashrc` or `~/.zshrc` file to enable it automatically for all sessions.
